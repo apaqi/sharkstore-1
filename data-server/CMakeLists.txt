@@ -187,8 +187,7 @@ set(SOURCES
     src/range/peer.cpp
     src/range/snapshot.cpp
     src/range/kv_funcs.cpp
-	src/range/watch.cpp
-	src/range/watch_funcs.cpp
+    src/range/watch.cpp
     src/range/submit.cpp
     src/storage/aggregate_calc.cpp
     src/storage/field_value.cpp
@@ -212,6 +211,7 @@ set(SOURCES
 	src/watch/watcher_set.cpp
 	src/watch/watch_server.cpp
 	src/watch/watch_event_buffer.cpp
+    src/watch/watch_util.cpp
     src/monitor/statistics.cpp
     src/admin/admin_server.cpp
     src/admin/get_config.cpp

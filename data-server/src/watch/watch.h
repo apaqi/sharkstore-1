@@ -6,24 +6,23 @@ namespace dataserver {
 namespace watch {
 
 typedef int64_t WatcherId; // socket session id
-typedef int64_t RangeId;
 typedef std::string Key;
 typedef std::string Prefix;
 typedef std::string WatcherKey;
 typedef std::string PrefixKey;
 
-enum WatchCode {
-    WATCH_OK = 0,
-    WATCH_KEY_EXIST,
-    WATCH_KEY_NOT_EXIST,
-    WATCH_WATCHER_EXIST,
-    WATCH_WATCHER_NOT_EXIST,
-    WATCH_WATCHER_NOT_NEED
+enum class WatchCode {
+    kOK = 0,
+    kKeyExist,
+    kKeyNotExist,
+    kWatcherExist,
+    kWatcherNotExist,
+    kWatcherNotNeed,
 };
 
-enum WatchType {
-    WATCH_KEY = 0,
-    WATCH_PREFIX
+enum class WatchType {
+    kKey = 0,
+    kPrefix = 1,
 };
 
 }

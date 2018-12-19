@@ -1,15 +1,12 @@
+#include <pthread.h>
+#include <errno.h>
 
 #include "base/status.h"
 #include "range/range.h"
-#include "range/watch.h"
 
 #include "watcher_set.h"
 #include "common/socket_session_impl.h"
 #include "frame/sf_logger.h"
-
-#include <pthread.h>
-#include <error.h>
-#include <errno.h>
 
 namespace sharkstore {
 namespace dataserver {
@@ -193,7 +190,7 @@ WatchCode WatcherSet::AddWatcher(const WatcherKey& key, WatcherPtr& w_ptr, Watch
                 //single key
                 ret = store_->Get(key, &val);
                 if(ret.ok()){
-                    if (!watch::Watcher::DecodeValue(&version, &userVal, &ext, val)) {
+                    if (!watch::Watcher::DecodeValue(val, &version, &userVal, &ext)) {
                         FLOG_ERROR("AddWatcher error,Decode  key: %s", EncodeToHexString(key).c_str());
                         version = 0;
                         return WATCH_WATCHER_NOT_NEED;
@@ -486,7 +483,6 @@ std::pair<int32_t, bool> WatcherSet::loadFromDb(storage::Store *store, const wat
     int64_t maxVersion{0};
     auto err = std::make_shared<errorpb::Error>();
 
-    //<db-count:db-exists-data>
     std::pair<int32_t, bool> result;
     result.second = false;
 
@@ -519,18 +515,15 @@ std::pair<int32_t, bool> WatcherSet::loadFromDb(storage::Store *store, const wat
             maxVersion = kv.version();
         }
 
-        //if( kv.version() > startVersion) {
+        for (int16_t i = 0; i < kv.key().size(); i++) {
+            evt->mutable_kv()->add_key(kv.key(i));
+        }
 
-            for (int16_t i = 0; i < kv.key().size(); i++) {
-                evt->mutable_kv()->add_key(kv.key(i));
-            }
+        evt->mutable_kv()->set_value(kv.value());
+        evt->mutable_kv()->set_version(kv.version());
+        evt->set_type(evtType);
 
-            evt->mutable_kv()->set_value(kv.value());
-            evt->mutable_kv()->set_version(kv.version());
-            evt->set_type(evtType);
-
-            count++;
-        //}
+        count++;
 
         iterator->Next();
     }
