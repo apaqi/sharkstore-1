@@ -437,12 +437,3 @@ TEST_F(WatchTest, watch_get_benchmark) {
 }
 #endif
 
-/*
-TEST_F(WatchTest, test_info) {
-    FLOG_WARN("-------------------------------------------------------");
-    FLOG_WARN("pure_get_single 单key查询");
-    FLOG_WARN("pure_get_group　前缀查询,查询不存在的key");
-    FLOG_WARN("test_priority_queue 超时队列元素排序效果测试");
-    FLOG_WARN("-------------------------------------------------------");
-}
-*/

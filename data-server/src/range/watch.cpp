@@ -213,10 +213,7 @@ void Range::PureGet(common::ProtoMessage *msg, watchpb::DsKvWatchGetMultiRequest
         }
 
         //encode key
-        if( 0 != WatchEncodeAndDecode::EncodeKv(funcpb::kFuncWatchGet, meta_.Get(), req.kv(), dbKey, dbValue, err)) {
-            break;
-        }
-
+        watch::EncodeKV(meta_.GetTableID(), req.kv(), &dbKey, &dbValue);
         RANGE_LOG_INFO("PureGet key before:%s after:%s", key[0].c_str(), EncodeToHexString(dbKey).c_str());
 
         auto epoch = req.header().range_epoch();
@@ -237,7 +234,7 @@ void Range::PureGet(common::ProtoMessage *msg, watchpb::DsKvWatchGetMultiRequest
 
         if (prefix) {
             dbKeyEnd.assign(dbKey);
-            if( 0 != WatchEncodeAndDecode::NextComparableBytes(dbKey.data(), dbKey.length(), dbKeyEnd)) {
+            if(!watch::NextComparableBytes(dbKey.data(), dbKey.length(), dbKeyEnd)) {
                 //to do set error message
                 break;
             }
@@ -253,8 +250,9 @@ void Range::PureGet(common::ProtoMessage *msg, watchpb::DsKvWatchGetMultiRequest
                 auto tmpDbKey = iterator.get()->key();
                 auto tmpDbValue = iterator.get()->value();
 
-                if(Status::kOk != WatchEncodeAndDecode::DecodeKv(funcpb::kFuncPureGet, meta_.GetTableID(), kv, tmpDbKey, tmpDbValue, err)) {
-                    //break;
+                auto s = watch::DecodeKV(tmpDbKey, tmpDbValue, kv);
+                if (!s.ok()) {
+                    // TODO:
                     continue;
                 }
                 //to judge version after decoding value and spliting version from value
@@ -279,16 +277,9 @@ void Range::PureGet(common::ProtoMessage *msg, watchpb::DsKvWatchGetMultiRequest
                            EncodeToHexString(dbValue).c_str());
 
                 auto kv = resp->add_kvs();
-                /*
-                int64_t dbVersion(0);
-                std::string userValue("");
-                std::string extend("");
-                watch::Watcher::DecodeValue(&dbVersion, &userValue, &extend, dbValue);
-                */
                 if (Status::kOk != WatchEncodeAndDecode::DecodeKv(funcpb::kFuncPureGet, meta_.GetTableID(), kv, dbKey, dbValue, err)) {
                     RANGE_LOG_WARN("DecodeKv fail. dbvalue:%s  err:%s", EncodeToHexString(dbValue).c_str(),
                                err->message().c_str());
-                    //break;
                 }
             }
 
@@ -556,17 +547,13 @@ Status Range::ApplyWatchDel(const raft_cmdpb::Command &cmd, uint64_t raftIdx) {
     Status ret;
     errorpb::Error *err = nullptr;
 
-//    RANGE_LOG_DEBUG("ApplyWatchDel begin");
-
     auto &req = cmd.kv_watch_del_req();
     auto btime = get_micro_second();
     watchpb::WatchKeyValue notifyKv;
     notifyKv.CopyFrom(req.kv());
     auto prefix = req.prefix();
 
-    uint64_t version{0};
-    //version = getNextVersion(err);
-    version = raftIdx;
+    uint64_t version = raftIdx;
 
     notifyKv.set_version(version);
     RANGE_LOG_DEBUG("ApplyWatchDel new-version[%" PRIu64 "]", version);
@@ -577,7 +564,7 @@ Status Range::ApplyWatchDel(const raft_cmdpb::Command &cmd, uint64_t raftIdx) {
 
     std::vector<std::string*> userKeys;
     for(auto i = 0; i < req.kv().key_size(); i++) {
-        userKeys.push_back(std::move(new std::string(req.kv().key(i))));
+        userKeys.push_back(new std::string(req.kv().key(i)));
     }
     watch::Watcher::EncodeKey(&dbKey, meta_.GetTableID(), userKeys);
 
@@ -587,7 +574,7 @@ Status Range::ApplyWatchDel(const raft_cmdpb::Command &cmd, uint64_t raftIdx) {
 
     if(!req.kv().value().empty()) {
         std::string extend;
-        watch::Watcher::EncodeValue(&dbValue, version, req.kv().value(), extend);
+        watch::EncodeValue(&dbValue, version, req.kv().value(), extend);
     }
 
     std::vector<std::string> delKeys;

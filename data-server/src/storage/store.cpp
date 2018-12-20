@@ -19,20 +19,17 @@ static const size_t kDefaultMaxSelectLimit = 10000;
 
 static Status updateRow(kvrpcpb::KvPair* row, const RowResult& r);
 
-Store::Store(const metapb::Range& meta, rocksdb::DB* db) :
-    table_id_(meta.table_id()) ,
-    range_id_(meta.id()),
-    start_key_(meta.start_key()),
-    end_key_(meta.end_key()),
+Store::Store(const range::MetaKeeper& meta, rocksdb::DB* db) :
+    meta_(meta),
+    table_id_(meta.GetTableID()) ,
+    range_id_(meta.GetRangeID()),
     db_(db) {
-    assert(!start_key_.empty());
-    assert(!end_key_.empty());
-    assert(meta.primary_keys_size() > 0);
-    for (int i = 0; i < meta.primary_keys_size(); ++i) {
-        primary_keys_.push_back(meta.primary_keys(i));
-    }
-
     write_options_.disableWAL = ds_config.rocksdb_config.disable_wal;
+    meta_.GetPrimaryKeys(&primary_keys_);
+
+    assert(!meta.GetStartKey().empty());
+    assert(!meta.GetEndKey().empty());
+    assert(!primary_keys_.empty());
 }
 
 Store::~Store() {}
@@ -478,63 +475,35 @@ Status Store::DeleteRows(const kvrpcpb::DeleteRequest& req,
 }
 
 Status Store::Truncate() {
-    rocksdb::WriteOptions op;
+    auto start_key = meta_.GetStartKey();
+    auto end_key = meta_.GetEndKey();
+    assert(!start_key.empty());
+    assert(!end_key.empty());
+    assert(start_key < end_key);
 
-    std::unique_lock<std::mutex> lock(key_lock_);
     auto family = db_->DefaultColumnFamily();
-
-    assert(!start_key_.empty());
-    assert(!end_key_.empty());
-    assert(start_key_ < end_key_);
-
-    auto s = db_->DeleteRange(op, family, start_key_, end_key_);
+    rocksdb::WriteOptions op;
+    auto s = db_->DeleteRange(op, family, start_key, end_key);
     if (!s.ok()) {
         return Status(Status::kIOError, "delete range", s.ToString());
     }
-
     return Status::OK();
 };
 
-void Store::SetEndKey(std::string end_key) {
-    std::unique_lock<std::mutex> lock(key_lock_);
-    assert(start_key_ < end_key);
-    end_key_ = std::move(end_key);
-}
-
-std::string Store::GetEndKey() const {
-    std::unique_lock<std::mutex> lock(key_lock_);
-    return end_key_;
-}
-
 Iterator* Store::NewIterator(const kvrpcpb::Scope& scope) {
-    auto it = db_->NewIterator(rocksdb::ReadOptions(ds_config.rocksdb_config.read_checksum,true));
-    std::string start = scope.start();
-    std::string limit = scope.limit();
-    if (start.empty() || start < start_key_) {
-        start = start_key_;
-    }
-
-    {
-        std::unique_lock<std::mutex> lock(key_lock_);
-        if (limit.empty() || limit > end_key_) {
-            limit = end_key_;
-        }
-    }
-    return new Iterator(it, start, limit);
+    return NewIterator(scope.start(), scope.limit());
 }
 
 Iterator* Store::NewIterator(std::string start, std::string limit) {
+    auto left_bound = meta_.GetStartKey();
+    if (start.empty() || start < left_bound) {
+        start = left_bound;
+    }
+    auto right_bound = meta_.GetEndKey();
+    if (limit.empty() || limit > right_bound) {
+        limit = right_bound;
+    }
     auto it = db_->NewIterator(rocksdb::ReadOptions(ds_config.rocksdb_config.read_checksum,true));
-    if (start.empty() || start < start_key_) {
-        start = start_key_;
-    }
-
-    {
-        std::unique_lock<std::mutex> lock(key_lock_);
-        if (limit.empty() || limit > end_key_) {
-            limit = end_key_;
-        }
-    }
     return new Iterator(it, start, limit);
 }
 
@@ -672,7 +641,7 @@ Status Store::StatSize(uint64_t split_size, range::SplitKeyMode mode,
     // the length of start_key_ and more than 5,
     // then the length of the split_key is
     // start_key_.length() + 5
-    auto max_len = start_key_.length() + 5;
+    auto max_len = meta_.GetStartKey().length() + 5;
 
     std::unique_ptr<Iterator> it(NewIterator());
     std::string middle_key;
@@ -746,6 +715,10 @@ Status Store::StatSize(uint64_t split_size, range::SplitKeyMode mode,
 
     *real_size = total_size;
     return Status::OK();
+}
+
+bool Store::checkInRange(const std::string &key) const {
+    return key >= meta_.GetStartKey() && key < meta_.GetEndKey();
 }
 
 } /* namespace storage */

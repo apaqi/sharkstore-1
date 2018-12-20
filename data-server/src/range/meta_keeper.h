@@ -24,9 +24,11 @@ public:
     void Set(const metapb::Range& to);
     void Set(metapb::Range&& to);
 
+    uint64_t GetRangeID() const;
     uint64_t GetTableID() const;
     std::string GetStartKey() const;
     std::string GetEndKey() const;
+    void GetPrimaryKeys(std::vector<metapb::Column>* pks) const;
 
     void GetEpoch(metapb::RangeEpoch* epoch) const;
     uint64_t GetConfVer() const;

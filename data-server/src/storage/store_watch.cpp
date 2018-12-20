@@ -18,11 +18,10 @@ std::string Store::encodeWatchKey(const watchpb::WatchKeyValue& kv) const {
 }
 
 std::string Store::encodeWatchValue(const watchpb::WatchKeyValue& kv, int64_t version) const {
-    static const std::string kExtendValue = "reserved";
     std::string buf;
     EncodeIntValue(&buf, 2, version);
     EncodeBytesValue(&buf, 3, kv.value().c_str(), kv.value().size());
-    EncodeBytesValue(&buf, 4, kExtendValue.c_str(), kExtendValue.size());
+    EncodeBytesValue(&buf, 3, kv.ext().c_str(), kv.ext().size());
     return buf;
 }
 
@@ -44,73 +43,133 @@ bool Store::decodeWatchValue(const std::string& value, watchpb::WatchKeyValue *k
     return DecodeBytesValue(value, offset, kv->mutable_ext());
 }
 
+bool Store::CheckInRange(const watchpb::WatchKeyValue& kv) const {
+    return checkInRange(encodeWatchKey(kv));
+}
 
-Status Store::WatchPut(const watchpb::KvWatchPutRequest& req, int64_t version) {
-    if (req.kv().key_size() == 0) {
+Status Store::WatchPut(const watchpb::WatchKeyValue& kv, int64_t version) {
+    if (kv.key_size() == 0) {
         return Status(Status::kInvalidArgument, "insufficient keys size",
-                      std::to_string(req.kv().key_size()));
+                      std::to_string(kv.key_size()));
     }
-    auto key = encodeWatchKey(req.kv());
-    auto value = encodeWatchValue(req.kv(), version);
+    auto key = encodeWatchKey(kv);
+    auto value = encodeWatchValue(kv, version);
     return this->Put(key, value);
 }
 
-Status Store::WatchDelete(const watchpb::KvWatchDeleteRequest& req) {
-    if (req.kv().key_size() == 0) {
-        return Status(Status::kInvalidArgument, "insufficient keys size",
-                std::to_string(req.kv().key_size()));
-    }
-
-    if (!req.prefix()) {
-        return this->Delete(encodeWatchKey(req.kv()));
-    } else {
-        // TODO:
-        return Status(Status::kNotSupported);
-    }
-}
-
-Status Store::WatchGet(const watchpb::DsKvWatchGetMultiRequest& req,
-                       watchpb::DsKvWatchGetMultiResponse *resp) {
-    // get key
-    if (!req.prefix()) {
-        auto key = encodeWatchKey(req.kv());
-        std::string value;
-        auto s = this->Get(key, &value);
-        if (!s.ok()) return s;
-
-        auto resp_kv = resp->add_kvs();
-        if (!decodeWatchValue(value, resp_kv)) {
-            return Status(Status::kCorruption, "decode watch value", EncodeToHex(value));
-        }
-
-        for (const auto& k : req.kv().key()) {
-            resp_kv->add_key(k);
-        }
-        return Status::OK();
-    }
-
-    // get prefix
-    auto start = encodeWatchKey(req.kv());
+Status Store::watchDeletePrefix(const watchpb::WatchKeyValue& kv,
+                         std::vector<watchpb::WatchKeyValue> *deleted_keys) {
+    auto start = encodeWatchKey(kv);
     auto limit = NextComparable(start);
     assert(!limit.empty());
     std::unique_ptr<Iterator> iter(NewIterator(start ,limit));
+
+    rocksdb::WriteBatch batch;
+    rocksdb::Status s;
+    uint64_t keys_written = 0;
+    uint64_t bytes_written = 0;
     while (iter->Valid()) {
-        auto resp_kv = resp->add_kvs();
-        if (!decodeWatchKey(iter->key(), resp_kv)) {
-            return Status(Status::kCorruption, "decode watch key", EncodeToHex(iter->key()));
+        // add to deleted
+        auto db_key = iter->key();
+        watchpb::WatchKeyValue deleted_kv;
+        if (!decodeWatchKey(db_key , &deleted_kv)) {
+            return Status(Status::kCorruption, "decode watch key", EncodeToHex(db_key));
         }
-        if (!decodeWatchValue(iter->value(), resp_kv)) {
-            return Status(Status::kCorruption, "decode watch value", EncodeToHex(iter->value()));
+        deleted_keys->push_back(std::move(deleted_kv));
+        // add to batch
+        s = batch.Delete(db_key);
+        if (!s.ok()) {
+            return Status(Status::kIOError, "watch batch add delete", s.ToString());
         }
+
+        bytes_written += db_key.size();
+        ++keys_written;
         iter->Next();
     }
+    if (!iter->status().ok()) {
+        return iter->status();
+    }
+
+    s = db_->Write(write_options_, &batch);
+    if (!s.ok()) {
+        return Status(Status::kIOError, "watch batch write", s.ToString());
+    } else {
+        addMetricWrite(keys_written, bytes_written);
+        return Status::OK();
+    }
+}
+
+Status Store::WatchDelete(const watchpb::WatchKeyValue& key, bool prefix,
+                   std::vector<watchpb::WatchKeyValue> *deleted_keys) {
+    assert(deleted_keys != nullptr);
+
+    if (key.key_size() == 0) {
+        return Status(Status::kInvalidArgument, "insufficient keys size",
+                      std::to_string(key.key_size()));
+    }
+
+    if (!prefix) {
+        deleted_keys->push_back(key);
+        return this->Delete(encodeWatchKey(key));
+    } else {
+        return watchDeletePrefix(key, deleted_keys);
+    }
+}
+
+Status Store::watchGetPrefix(const watchpb::WatchKeyValue& kv,
+                      std::vector<watchpb::WatchKeyValue> *result) {
+    auto start = encodeWatchKey(kv);
+    auto limit = NextComparable(start);
+    assert(!limit.empty());
+    std::unique_ptr<Iterator> iter(NewIterator(start ,limit));
+    uint64_t bytes_read = 0;
+    uint64_t keys_read = 0;
+    while (iter->Valid()) {
+        auto db_key = iter->key();
+        auto db_value = iter->value();
+        result->push_back(watchpb::WatchKeyValue());
+        if (!decodeWatchKey(db_key, &result->back())) {
+            return Status(Status::kCorruption, "decode watch key", EncodeToHex(db_key));
+        }
+        if (!decodeWatchValue(db_value, &result->back())) {
+            return Status(Status::kCorruption, "decode watch value", EncodeToHex(db_value));
+        }
+
+        bytes_read += db_key.size();
+        bytes_read += db_value.size();
+        ++keys_read;
+        iter->Next();
+    }
+    addMetricRead(keys_read, bytes_read);
     return iter->status();
 }
 
-Status Store::WatchScan() {
-    return Status(Status::kNotSupported);
-}
+Status Store::WatchGet(const watchpb::WatchKeyValue& key, bool prefix,
+                std::vector<watchpb::WatchKeyValue> *result) {
+    assert(result != nullptr);
 
+    if (key.key_size() == 0) {
+        return Status(Status::kInvalidArgument, "insufficient keys size",
+                      std::to_string(key.key_size()));
+    }
+
+    if (prefix) {
+        return watchGetPrefix(key, result);
+    }
+
+    std::string db_value;
+    auto db_key = encodeWatchKey(key);
+    auto s = this->Get(db_key, &db_value);
+    if (!s.ok()) {
+        return s;
+    }
+    watchpb::WatchKeyValue result_kv = key; // copy key
+    if (!decodeWatchValue(db_value, &result_kv)) { // decode value
+        return Status(Status::kCorruption, "decode watch value", EncodeToHex(db_value));
+    }
+    result->push_back(std::move(result_kv)); // add to result
+    return Status::OK();
+}
 
 } /* namespace storage */
 } /* namespace dataserver */

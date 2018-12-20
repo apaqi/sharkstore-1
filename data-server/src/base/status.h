@@ -5,6 +5,7 @@ _Pragma("once");
 
 namespace sharkstore {
 
+// Modified from rocksdb::Status
 class Status {
 public:
     enum Code {
@@ -22,7 +23,6 @@ public:
         kDuplicate = 11,
         kCompacted = 12,
         kEndofFile = 13,
-
         kNoLeader = 14,
         kNotLeader = 15,
         kStaleEpoch = 16,
@@ -34,8 +34,8 @@ public:
         kNoLeftSpace = 22,
         kUnexpected = 23,
         kOutOfBound = 24,
-
         kNotChange = 25,
+        kNotInRange = 26;
 
         kUnknown = 255,
     };

@@ -103,6 +103,12 @@ std::string Status::ToString() const {
         case kOutOfBound:
             type = "Out Of Bound: ";
             break;
+        case kNotChange:
+            type = "Not Change";
+            break;
+        case kNotInRange:
+            type = "Not In Range";
+            break;
         default:
             snprintf(tmp, sizeof(tmp), "Unknown code(%d): ", static_cast<int>(code_));
             type = tmp;

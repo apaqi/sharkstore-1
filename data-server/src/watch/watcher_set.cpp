@@ -1,12 +1,13 @@
+#include "watcher_set.h"
+
 #include <pthread.h>
 #include <errno.h>
 
 #include "base/status.h"
 #include "range/range.h"
-
-#include "watcher_set.h"
 #include "common/socket_session_impl.h"
 #include "frame/sf_logger.h"
+#include "watch_util.h"
 
 namespace sharkstore {
 namespace dataserver {
@@ -20,7 +21,6 @@ WatcherSet::WatcherSet() {
             // watcher queue is empty, sleep 10ms
             if (watcher_queue_.empty()) {
                 watcher_expire_cond_.wait_for(lock, std::chrono::milliseconds(1000));
-                //watcher_expire_cond_.wait(lock);
             }
 
             // find the first wait watcher
@@ -28,18 +28,7 @@ WatcherSet::WatcherSet() {
             while (!watcher_queue_.empty()) {
                 w_ptr = watcher_queue_.top();
                 if (w_ptr->IsSentResponse()) {
-                    // repsonse is sent, delete watcher in map and queue
-                    // delete in map
-//                    WatcherKey encode_key;
-//                    w_ptr->EncodeKey(&encode_key, w_ptr->GetTableId(), w_ptr->GetKeys(false));
-//                    if (w_ptr->GetType() == WATCH_KEY) {
-//                        DelKeyWatcher(encode_key, w_ptr->GetWatcherId());
-//                    } else {
-//                        DelPrefixWatcher(encode_key, w_ptr->GetWatcherId());
-//                    }
-
                     watcher_queue_.pop();
-
                     FLOG_INFO("queue_size:%" PRId64 " watcher is sent response, timer queue pop : watch_id:[%" PRIu64 "]",
                             watcher_queue_.size(), w_ptr->GetWatcherId());
                     w_ptr = nullptr;
@@ -62,15 +51,11 @@ WatcherSet::WatcherSet() {
                 auto resp = new watchpb::DsWatchResponse;
                 resp->mutable_resp()->set_code(Status::kTimedOut);
 
-//                auto err = new errorpb::Error();
-//                err->set_message("watch request timeout");
-//                resp->mutable_header()->set_allocated_error(err);
-
                 w_ptr->Send(resp);
 
                 // delete in map
                 WatcherKey encode_key;
-                w_ptr->EncodeKey(&encode_key, w_ptr->GetTableId(), w_ptr->GetKeys());
+                EncodeKey(&encode_key, w_ptr->GetTableId(), w_ptr->GetKeys());
                 if (w_ptr->GetType() == WATCH_KEY) {
                     DelKeyWatcher(encode_key, w_ptr->GetWatcherId());
                 } else {
@@ -88,9 +73,6 @@ WatcherSet::WatcherSet() {
                            w_ptr->GetWatcherId(), excEnd-excBegin,excBegin-waitBeginTime);
 
                 FLOG_DEBUG("timeout, expire:%" PRId64 "us now:%" PRId64 "us", w_ptr->GetExpireTime(), excEnd);
-
-//                FLOG_INFO("watcher expire timeout, timer queue pop: session_id: %" PRId64 " watch_id:[%" PRIu64 "] key: [%s]",
-//                          w_ptr->GetMessage()->session_id, w_ptr->GetWatcherId(), EncodeToHexString(encode_key).c_str());
             }
         }
         FLOG_DEBUG("thread exit...");
@@ -101,7 +83,7 @@ WatcherSet::WatcherSet() {
     snprintf(timer_name, 32, "watcher_timer");
     AnnotateThread(handle, timer_name);
 
-    struct sched_param param;
+    sched_param param;
 
     int policy;
     pthread_getschedparam(watcher_timer_.native_handle(), &policy, &param);
@@ -159,10 +141,10 @@ WatchCode WatcherSet::AddWatcher(const WatcherKey& key, WatcherPtr& w_ptr, Watch
                 if(w_ptr->getBufferFlag() < 0) {
 
                     std::string endKey(key);
-                    if (0 != range::WatchEncodeAndDecode::NextComparableBytes(key.data(), key.length(), endKey)) {
+                    if (0 != NextComparableBytes(key.data(), key.length(), endKey)) {
                         //to do set error message
                         FLOG_ERROR("AddWatcher error, NextComparableBytes execute error.");
-                        return WATCH_WATCHER_NOT_NEED;
+                        return WatchCode::kWatcherNotNeed;
                     }
 
                     auto ds_resp = new watchpb::DsWatchResponse;
@@ -190,17 +172,17 @@ WatchCode WatcherSet::AddWatcher(const WatcherKey& key, WatcherPtr& w_ptr, Watch
                 //single key
                 ret = store_->Get(key, &val);
                 if(ret.ok()){
-                    if (!watch::Watcher::DecodeValue(val, &version, &userVal, &ext)) {
+                    if (!DecodeValue(val, &version, &userVal, &ext)) {
                         FLOG_ERROR("AddWatcher error,Decode  key: %s", EncodeToHexString(key).c_str());
                         version = 0;
-                        return WATCH_WATCHER_NOT_NEED;
+                        return WatchCode::kWatcherNotNeed;
                     }
                     result.first = 1;
                     result.second = true;
                 }else if(ret.code() != Status::kNotFound) {
                     FLOG_ERROR("AddWatcher error,Get key: %s err:%s", EncodeToHexString(key).c_str(), ret.ToString().c_str());
                     version = 0;
-                    return WATCH_WATCHER_NOT_NEED;
+                    return WatchCode::kWatcherNotNeed;
                 }
 
                 //db有数据　用户版本为０　首次返回数据给client
@@ -217,17 +199,13 @@ WatchCode WatcherSet::AddWatcher(const WatcherKey& key, WatcherPtr& w_ptr, Watch
                     evt->mutable_kv()->set_version(version);
                     evt->mutable_kv()->set_value(userVal);
 
-                    std::vector<std::string *> vecKeys;
-                    watch::Watcher::DecodeKey(vecKeys, key);
-                    for(auto itKey:vecKeys) {
-                        evt->mutable_kv()->add_key(*itKey);
+                    std::vector<std::string> decoded_keys;
+                    watch::DecodeKey(key, &decoded_keys);
+                    for(const auto& key :decoded_keys) {
+                        evt->mutable_kv()->add_key(key);
                     }
-                    for(auto itKey:vecKeys) {
-                        delete itKey;
-                    }
-
                     w_ptr->Send(ds_resp);
-                    return WATCH_OK;
+                    return WatchCode::kOK;
                 }
             }
 
@@ -241,7 +219,7 @@ WatchCode WatcherSet::AddWatcher(const WatcherKey& key, WatcherPtr& w_ptr, Watch
                 ds_resp->mutable_resp()->set_watchid(w_ptr->GetWatcherId());
 
                 w_ptr->Send(ds_resp);
-                return WATCH_KEY_NOT_EXIST;
+                return WatchCode::kKeyNotExist;
             }
 
         }
@@ -266,31 +244,27 @@ WatchCode WatcherSet::AddWatcher(const WatcherKey& key, WatcherPtr& w_ptr, Watch
     //用户版本非０　但小于内存版本,返回数据给client; 等于内存版本，增加watcher
     if(clientVersion == 0) {
         if(watcher_map_it->second->key_version_ > 0) {
-            return WATCH_WATCHER_NOT_NEED;
+            return WatchCode::kWatcherNotNeed;
         }
     } else {
         if(clientVersion < watcher_map_it->second->key_version_) {
-            return WATCH_WATCHER_NOT_NEED;
+            return WatchCode::kWatcherNotNeed;
         }
     }
 
     int64_t endTime(getticks());
     auto ret = watcher_map.emplace(std::make_pair(watcher_id, w_ptr)).second;
     if (ret) {
-        //add to key_map_
-        //key_map.emplace(std::make_pair(watcher_id, key));
-
         // add to queue
         watcher_queue_.push(w_ptr);
         watcher_expire_cond_.notify_one();
 
-        code = WATCH_OK;
+        code = WatchCode::kOK;
 
         FLOG_INFO("AddWatcher success, count:%" PRIu64 " queue_size:%" PRId64 " watcher_id[%" PRIu64 "] key: [%s]  take time:%" PRId64 " ms",
                   watcher_map_it->second->mapKeyWatcher.size(), watcher_queue_.size(), w_ptr->GetWatcherId(), EncodeToHexString(key).c_str(), endTime - beginTime);
     } else {
-        code = WATCH_WATCHER_EXIST;
-
+        code = WatchCode::kWatcherExist;
         FLOG_ERROR("AddWatcher error, watcher_id[%" PRIu64 "] exists, key: [%s] take time:%" PRId64 " ms",
                   w_ptr->GetWatcherId(), EncodeToHexString(key).c_str(), endTime - beginTime);
     }
@@ -300,41 +274,6 @@ WatchCode WatcherSet::AddWatcher(const WatcherKey& key, WatcherPtr& w_ptr, Watch
 WatchCode WatcherSet::DelWatcher(const WatcherKey& key, WatcherId watcher_id, WatcherMap& watcher_map_, KeyMap& key_map_) {
     int64_t beginTime(getticks());
     std::lock_guard<std::mutex> lock(watcher_map_mutex_);
-
-    // XXX del from queue, pop in watcher expire thread
-
-    // del from key map
-    /*auto key_map_it = key_map_.find(watcher_id);
-    if (key_map_it == key_map_.end()) {
-        FLOG_WARN("watcher del failed, watcher id is not existed in key map: watch_id:[%" PRIu64 "] key: [%s]",
-                  watcher_id, EncodeToHexString(key).c_str());
-        //return WATCH_WATCHER_NOT_EXIST; // no watcher id in key map
-    } else {
-        auto &keys = key_map_it->second;
-        auto key_it = keys->find(key);
-        if (key_it == keys->end()) {
-            FLOG_WARN("watcher del failed, key is not existed in key map: watch_id:[%"
-                              PRIu64
-                              "] key: [%s]",
-                      watcher_id, EncodeToHexString(key).c_str());
-            return WATCH_KEY_NOT_EXIST; // no key in key map
-        }
-
-        // do del from key map
-        keys->erase(key_it);
-
-        //erase key:watchid
-        if (keys->empty()) {
-            key_map_.erase(key_map_it);
-        }
-
-        FLOG_WARN("watcher del success within key map: watch_id:[%"
-                          PRIu64
-                          "] key: [%s]",
-                  watcher_id, EncodeToHexString(key).c_str());
-    }
-    */
-
     // del from watcher map
     auto watcher_map_it = watcher_map_.find(key);
     if (watcher_map_it == watcher_map_.end()) {
@@ -372,7 +311,7 @@ WatchCode WatcherSet::DelWatcher(const WatcherKey& key, WatcherId watcher_id, Wa
     FLOG_INFO("watcher del end: watch_id:[%" PRIu64 "] key: [%s] take time:%" PRId64 " ms",
               watcher_id, EncodeToHexString(key).c_str(), endTime - beginTime);
 
-    return WATCH_OK;
+    return WatchCode::kOK;
 }
 
 WatchCode WatcherSet::GetWatchers(const watchpb::EventType &evtType, std::vector<WatcherPtr>& vec, const WatcherKey& key, WatcherMap& watcherMap, WatcherValue *watcherValue, bool prefixFlag) {
@@ -381,7 +320,7 @@ WatchCode WatcherSet::GetWatchers(const watchpb::EventType &evtType, std::vector
     auto itWatcherVal = watcherMap.find(key);
     if (itWatcherVal == watcherMap.end()) {
         FLOG_INFO("GetWatcher end,key[%s] has no watcher.", EncodeToHexString(key).c_str());
-        return WATCH_KEY_NOT_EXIST;
+        return WatchCode::kKeyNotExist;
     }
 
     //watcherId:watchPtr
@@ -401,11 +340,11 @@ WatchCode WatcherSet::GetWatchers(const watchpb::EventType &evtType, std::vector
         watcherMap.erase(itWatcherVal);
         FLOG_INFO("watcher get success,count:%" PRIu64 " key: [%s] watch_id[%" PRId64 "]",
                   watcherValue->mapKeyWatcher.size(), EncodeToHexString(key).c_str(), watcherValue->mapKeyWatcher.begin()->first );
-        return WATCH_OK;
+        return WatchCode::kOK;
     }
 
     FLOG_INFO("GetWatcher end, key [%s] has no watcher...", EncodeToHexString(key).c_str());
-    return WATCH_WATCHER_NOT_EXIST;
+    return WatchCode::kWatcherNotExist;
 
 }
 
@@ -421,16 +360,13 @@ WatchCode WatcherSet::DelKeyWatcher(const WatcherKey& key, WatcherId id) {
 // key get watchers
 WatchCode WatcherSet::GetKeyWatchers(const watchpb::EventType &evtType, std::vector<WatcherPtr>& vec, const WatcherKey& key, const int64_t &version) {
     auto watcherVal = new WatcherValue;
-    //auto mapKeyWatcher = new KeyWatcherMap;
     watcherVal->key_version_ = version;
 
     auto retCode = GetWatchers(evtType, vec, key, key_watcher_map_, watcherVal);
-    if( WATCH_OK == retCode) {
-
+    if(WatchCode::kOK == retCode) {
         for(auto it:watcherVal->mapKeyWatcher) {
             vec.push_back(it.second);
         }
-
         delete (watcherVal);
         watcherVal = nullptr;
     }
@@ -456,12 +392,10 @@ WatchCode WatcherSet::GetPrefixWatchers(const watchpb::EventType &evtType, std::
     watcherVal->key_version_ = version;
 
     auto retCode = GetWatchers(evtType, vec, prefix, prefix_watcher_map_, watcherVal, true);
-    if( WATCH_OK == retCode) {
-
+    if(WatchCode::kOK == retCode) {
         for(auto it:(watcherVal->mapKeyWatcher)) {
             vec.push_back(it.second);
         }
-
         delete (watcherVal);
         watcherVal = nullptr;
     }
@@ -503,7 +437,7 @@ std::pair<int32_t, bool> WatcherSet::loadFromDb(storage::Store *store, const wat
         auto tmpDbValue = iterator.get()->value();
 
         watchpb::WatchKeyValue kv;
-        if(Status::kOk != range::WatchEncodeAndDecode::DecodeKv(funcpb::kFuncPureGet, tableId, &kv, tmpDbKey, tmpDbValue, err.get())) {
+        if(Status::kOk != DecodeKV(tableId, &kv, tmpDbKey, tmpDbValue, err.get())) {
             //break;
             continue;
         }

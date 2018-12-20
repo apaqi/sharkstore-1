@@ -49,6 +49,11 @@ uint64_t MetaKeeper::GetVersion() const {
     return meta_.range_epoch().version();
 }
 
+uint64_t MetaKeeper::GetRangeID() const {
+    sharkstore::shared_lock<sharkstore::shared_mutex> lock(rw_lock_);
+    return meta_.id();
+}
+
 uint64_t MetaKeeper::GetTableID() const {
     sharkstore::shared_lock<sharkstore::shared_mutex> lock(rw_lock_);
     return meta_.table_id();
@@ -62,6 +67,13 @@ std::string MetaKeeper::GetStartKey() const {
 std::string MetaKeeper::GetEndKey() const {
     sharkstore::shared_lock<sharkstore::shared_mutex> lock(rw_lock_);
     return meta_.end_key();
+}
+
+void MetaKeeper::GetPrimaryKeys(std::vector<metapb::Column>* pks) const {
+    sharkstore::shared_lock<sharkstore::shared_mutex> lock(rw_lock_);
+    for (const auto& pk : meta_.primary_keys()) {
+        pks->push_back(pk);
+    }
 }
 
 Status MetaKeeper::verifyConfVer(uint64_t conf_ver) const {
