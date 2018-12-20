@@ -27,9 +27,7 @@ public:
     WatchCode DelKeyWatcher(WatcherPtr&);
     WatchCode DelPrefixWatcher(WatcherPtr&);
 
-    WatcherSet* GetWatcherSet(const std::string&);
-    WatchCode GetKeyWatchers(const watchpb::EventType &evtType, std::vector<WatcherPtr>&, const WatcherKey&, const WatcherKey&, const int64_t &version);
-    WatchCode GetPrefixWatchers(const watchpb::EventType &evtType, std::vector<WatcherPtr>&, const PrefixKey &, const PrefixKey &, const int64_t &version);
+    WatcherSet* GetWatcherSet(const std::string& first_key);
 
 private:
     uint64_t                    watcher_set_count_ = WATCHER_SET_COUNT_MIN;

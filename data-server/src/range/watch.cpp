@@ -50,8 +50,8 @@ Status Range::GetAndResp( watch::WatcherPtr pWatcher, const watchpb::WatchCreate
             }
 
             auto userKv = new watchpb::WatchKeyValue;
-            for(auto userKey : req.kv().key()) {
-                userKv->add_key(userKey);
+            for(const auto& key: req.kv().key()) {
+                userKv->add_key(key);
             }
             userKv->set_value(value);
             userKv->set_version(db_version);
@@ -130,7 +130,7 @@ void Range::WatchGet(common::ProtoMessage *msg, watchpb::DsWatchRequest &req) {
     if(prefix) {
         auto hashKey = w_ptr->GetKeys();
         std::string encode_key;
-        watch::EncodeKey(&encode_key, w_ptr->GetTableId(), {w_ptr->GetPrefix()});
+        watch::EncodeKey(&encode_key, w_ptr->GetTableId(), {w_ptr->GetFirstKey()});
 
         std::vector<watch::CEventBufferValue> vecUpdKeys;
 
@@ -337,22 +337,6 @@ void Range::WatchPut(common::ProtoMessage *msg, watchpb::DsKvWatchPutRequest &re
 
         RANGE_LOG_DEBUG("WatchPut key:%s value:%s", kv->key(0).c_str(), kv->value().c_str());
 
-        /*
-        //to do move to apply encode key
-        if( 0 != version_seq_->nextId(&version)) {
-            if (err == nullptr) {
-                err = new errorpb::Error;
-            }
-            err->set_message(version_seq_->getErrMsg());
-            break;
-        }
-        kv->set_version(version);
-        FLOG_DEBUG("range[%" PRIu64 "] WatchPut key-version[%" PRIu64 "]", meta_.id(), version);
-
-        if( Status::kOk != WatchCode::EncodeKv(funcpb::kFuncWatchPut, meta_, *kv, *dbKey, *dbValue, err) ) {
-            break;
-        }*/
-
         std::vector<std::string*> vecUserKeys;
         for ( auto i = 0 ; i < kv->key_size(); i++) {
             vecUserKeys.emplace_back(kv->mutable_key(i));
@@ -373,14 +357,6 @@ void Range::WatchPut(common::ProtoMessage *msg, watchpb::DsKvWatchPutRequest &re
 
             break;
         }
-
-        /*
-        //increase key version
-        kv->set_version(version);
-        kv->clear_key();
-        kv->add_key(*dbKey);
-        kv->set_value(*dbValue);
-        */
 
         //raft propagate at first, propagate KV after encodding
         if (!WatchPutSubmit(msg, req)) {
@@ -426,15 +402,6 @@ void Range::WatchDel(common::ProtoMessage *msg, watchpb::DsKvWatchDeleteRequest 
             break;
         }
 
-        /*
-        if(Status::kOk != WatchCode::EncodeKv(funcpb::kFuncWatchDel, meta_, *kv, *dbKey, *dbValue, err)) {
-            break;
-        }*/
-
-        /*std::vector<std::string*> vecUserKeys;
-        for(auto itKey : kv->key()) {
-            vecUserKeys.emplace_back(&itKey);
-        }*/
         std::vector<std::string*> vecUserKeys;
         for ( auto i = 0 ; i < kv->key_size(); i++) {
             vecUserKeys.emplace_back(kv->mutable_key(i));
@@ -454,25 +421,6 @@ void Range::WatchDel(common::ProtoMessage *msg, watchpb::DsKvWatchDeleteRequest 
             }
             break;
         }
-        /*
-        //set encoding value to request
-        kv->clear_key();
-        kv->add_key(*dbKey);
-        kv->set_value(*dbValue);
-        */
-
-        /*to do move to apply
-        //to do consume version and will reply to client
-        int64_t version{0};
-        if( 0 != version_seq_->nextId(&version)) {
-            if (err == nullptr) {
-                err = new errorpb::Error;
-            }
-            err->set_message(version_seq_->getErrMsg());
-            break;
-        }
-        kv->set_version(version);
-        */
 
         if (!WatchDeleteSubmit(msg, req)) {
             err = RaftFailError();
@@ -533,22 +481,13 @@ Status Range::ApplyWatchPut(const raft_cmdpb::Command &cmd, uint64_t raftIdx) {
     static int64_t version{0};
     version = raftIdx;
 
-    //for test
-    if (0) {
-        static std::atomic<int64_t> test_version = {0};
-        test_version += 1;
-        ////////////////////////////////////////////////////////////
-        version = test_version;
-        apply_index_=version;
-        ///////////////////////////////////////////////////////////
-    }
     notifyKv.set_version(version);
     RANGE_LOG_DEBUG("ApplyWatchPut new version[%" PRIu64 "]", version);
 
     int64_t beginTime(getticks());
 
-    std::string dbKey{""};
-    std::string dbValue{""};
+    std::string dbKey;
+    std::string dbValue;
     if( Status::kOk != WatchEncodeAndDecode::EncodeKv(funcpb::kFuncWatchPut, meta_.Get(), notifyKv, dbKey, dbValue, err) ) {
         //to do
         // SendError()
@@ -582,19 +521,6 @@ Status Range::ApplyWatchPut(const raft_cmdpb::Command &cmd, uint64_t raftIdx) {
             break;
         }
 
-        /*if(req.kv().key_size() > 1) {
-            //to do decode group key,ignore single key
-            auto value = std::make_shared<watch::CEventBufferValue>(notifyKv, watchpb::PUT);
-            if(value->key_size()) {
-                FLOG_DEBUG(">>>key is valid.");
-            }
-
-            if (!eventBuffer->enQueue(dbKey, value.get())) {
-                FLOG_ERROR("load delete event kv to buffer error.");
-            }
-        }
-        */
-
         if (cmd.cmd_id().node_id() == node_id_) {
             auto len = static_cast<uint64_t>(req.kv().ByteSizeLong());
             CheckSplit(len);
@@ -607,7 +533,7 @@ Status Range::ApplyWatchPut(const raft_cmdpb::Command &cmd, uint64_t raftIdx) {
         ReplySubmit(cmd, resp, err, btime);
 
         //notify watcher
-        std::string errMsg("");
+        std::string errMsg;
         int32_t retCnt = WatchNotify(watchpb::PUT, req.kv(), version, errMsg);
         if (retCnt < 0) {
             FLOG_ERROR("WatchNotify-put failed, ret:%d, msg:%s", retCnt, errMsg.c_str());
@@ -641,16 +567,6 @@ Status Range::ApplyWatchDel(const raft_cmdpb::Command &cmd, uint64_t raftIdx) {
     uint64_t version{0};
     //version = getNextVersion(err);
     version = raftIdx;
-
-    //for test
-    if (0) {
-        static std::atomic<int64_t> test_version = {1};
-        test_version += 1;
-        ////////////////////////////////////////////////////////////
-        version = test_version;
-        apply_index_=version;
-        ///////////////////////////////////////////////////////////
-    }
 
     notifyKv.set_version(version);
     RANGE_LOG_DEBUG("ApplyWatchDel new-version[%" PRIu64 "]", version);
@@ -791,7 +707,7 @@ int32_t Range::WatchNotify(const watchpb::EventType evtType, const watchpb::Watc
     std::vector<watch::WatcherPtr> vecPrefixNotifyWatcher;
 
     //continue to get prefix key
-    std::vector<std::string *> decodeKeys;
+    std::vector<std::string> decodeKeys;
     std::string hashKey;
     std::string dbKey;
 
@@ -800,29 +716,24 @@ int32_t Range::WatchNotify(const watchpb::EventType evtType, const watchpb::Watc
         hasPrefix = true;
     }
 
-    for(auto it : kv.key()) {
-        decodeKeys.emplace_back(std::move(new std::string(it)));
+    for(const auto& key : kv.key()) {
+        decodeKeys.push_back(key);
         //only push the first key
         break;
     }
 
-    watch::Watcher::EncodeKey(&hashKey, meta_.GetTableID(), decodeKeys);
+    watch::EncodeKey(&hashKey, meta_.GetTableID(), decodeKeys);
     if(hasPrefix) {
         int16_t tmpCnt{0};
-        for(auto it : kv.key()) {
+        for(const auto& key : kv.key()) {
             ++tmpCnt;
             if(tmpCnt == 1) continue;
             //to do skip the first element
-            decodeKeys.emplace_back(std::move(new std::string(it)));
+            decodeKeys.push_back(key);
         }
-        watch::Watcher::EncodeKey(&dbKey, meta_.GetTableID(), decodeKeys);
-
+        watch::EncodeKey(&dbKey, meta_.GetTableID(), decodeKeys);
     } else {
         dbKey = hashKey;
-    }
-
-    for(auto it : decodeKeys) {
-        delete it;
     }
 
     FLOG_DEBUG("WatchNotify haskkey:%s  key:%s version:%" PRId64, EncodeToHexString(hashKey).c_str(), EncodeToHexString(dbKey).c_str(), version);
@@ -838,7 +749,8 @@ int32_t Range::WatchNotify(const watchpb::EventType evtType, const watchpb::Watc
     int64_t currDbVersion{version};
     auto watch_server = context_->WatchServer();
 
-    watch_server->GetKeyWatchers(evtType, vecNotifyWatcher, hashKey, dbKey, currDbVersion);
+    auto watch_set = watch_server->GetWatcherSet(kv.key(0));
+    watch_set->GetKeyWatchers(evtType, vecNotifyWatcher, dbKey, currDbVersion);
 
     //start to send user kv to client
     int32_t watchCnt = vecNotifyWatcher.size();
@@ -855,7 +767,7 @@ int32_t Range::WatchNotify(const watchpb::EventType evtType, const watchpb::Watc
     }
 
     if(hasPrefix) {
-        watch_server->GetPrefixWatchers(evtType, vecPrefixNotifyWatcher, hashKey, hashKey, currDbVersion);
+        watch_set->GetPrefixWatchers(evtType, vecPrefixNotifyWatcher, hashKey, currDbVersion);
 
         watchCnt = vecPrefixNotifyWatcher.size();
         FLOG_DEBUG("prefix key notify:%" PRId32 " key:%s", watchCnt, EncodeToHexString(dbKey).c_str());
@@ -917,7 +829,7 @@ int32_t Range::WatchNotify(const watchpb::EventType evtType, const watchpb::Watc
                 //use iterator
                 std::string dbKeyEnd{""};
                 dbKeyEnd.assign(dbKey);
-                if( 0 != WatchEncodeAndDecode::NextComparableBytes(dbKey.data(), dbKey.length(), dbKeyEnd)) {
+                if( 0 != watch::NextComparableBytes(dbKey.data(), dbKey.length(), dbKeyEnd)) {
                     //to do set error message
                     FLOG_ERROR("NextComparableBytes error.");
                     return -1;
@@ -957,25 +869,25 @@ int32_t Range::SendNotify(watch::WatcherPtr& w, watchpb::DsWatchResponse *ds_res
     w->Send(ds_resp);
 
     //delete watch
-    watch::WatchCode del_ret = watch::WATCH_OK;
-    if (!prefix && w->GetType() == watch::WATCH_KEY) {
+    watch::WatchCode del_ret = watch::WatchCode::kOK;
+    if (!prefix && w->GetType() == watch::WatchType::kKey) {
         del_ret = watch_server->DelKeyWatcher(w);
-        if (del_ret) {
+        if (del_ret == watch::WatchCode::kOK) {
             RANGE_LOG_WARN(" DelKeyWatcher error, watch_id[%" PRId64 "]", w_id);
         } else {
             RANGE_LOG_WARN(" DelKeyWatcher execute end. watch_id:%" PRIu64, w_id);
         }
     }
 
-    if (prefix && w->GetType() == watch::WATCH_KEY) {
+    if (prefix && w->GetType() == watch::WatchType::kKey) {
         del_ret = watch_server->DelPrefixWatcher(w);
-        if (del_ret) {
+        if (del_ret == watch::WatchCode::kOK) {
             RANGE_LOG_WARN(" DelPrefixWatcher error, watch_id[%" PRId64 "]", w_id);
         } else {
             RANGE_LOG_WARN(" DelPrefixWatcher execute end. watch_id:%" PRIu64, w_id);
         }
     }
-    return del_ret;
+    return static_cast<int32_t>(del_ret);
 }
 
 

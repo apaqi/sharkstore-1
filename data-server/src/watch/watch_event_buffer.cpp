@@ -10,23 +10,12 @@ namespace sharkstore {
 namespace dataserver {
 namespace watch {
 
-void printBufferValue(CEventBufferValue &val) {
-    FLOG_DEBUG("key:%s value:%s version:%"
-                       PRId64,
-               EncodeToHexString(val.key(0)).c_str(), EncodeToHexString(val.value()).c_str(),
-               val.version());
-}
-
-bool operator < (const struct SGroupKey &l, const struct SGroupKey &r) {
+bool operator < (const struct GroupKey &l, const struct GroupKey &r) {
     return l.key_ < r.key_;
 }
 
-bool CEventBuffer::thread_flag_=true;
-int32_t CEventBuffer::milli_timeout_ = EVENT_BUFFER_TIME_OUT;
-
 CEventBuffer::CEventBuffer() {
     mapGroupBuffer.clear();
-//    create_thread();
 }
 
 CEventBuffer::CEventBuffer(const int &mapSize, const int &queueSize) {
@@ -37,15 +26,12 @@ CEventBuffer::CEventBuffer(const int &mapSize, const int &queueSize) {
     queue_capacity_ = queue_capacity_>0?queue_capacity_:DEFAULT_EVENT_QUEUE_SIZE;
 
     mapGroupBuffer.clear();
-//    create_thread();
 }
 
 CEventBuffer::~CEventBuffer() {
     for(auto it : mapGroupBuffer) {
         delete it.second;
     }
-    loop_flag_ = false;
-//    clear_thread_.join();
 }
 
 BufferReturnPair  CEventBuffer::loadFromBuffer(const std::string &grpKey,  int64_t userVersion,

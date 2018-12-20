@@ -26,7 +26,6 @@ namespace watch {
 #define DEFAULT_EVENT_QUEUE_SIZE  100
 
 class CEventBufferValue;
-void printBufferValue(CEventBufferValue &val);
 
 using BufferReturnPair = std::pair<int32_t, std::pair<int32_t, int32_t>>;
 
@@ -101,21 +100,21 @@ private:
     int64_t used_time_;
 };
 
-using GroupKey = struct SGroupKey {
+struct GroupKey {
     std::string key_;
     int64_t create_time_;
 
-    SGroupKey(const std::string &key) {
+    GroupKey(const std::string &key) {
         key_ = key;
         create_time_ = getticks();
     }
 
-    SGroupKey(const std::string &key, const int64_t &time) {
+    GroupKey(const std::string &key, const int64_t &time) {
         key_ = key;
         create_time_ = time;
     }
 };
-bool operator < (const struct SGroupKey &l, const struct SGroupKey &r);
+bool operator < (const struct GroupKey &l, const struct GroupKey &r);
 
 using GroupValue = CircularQueue<CEventBufferValue>;
 using MapGroupBuffer = std::map<GroupKey, GroupValue *>;
@@ -165,12 +164,6 @@ private:
 
     std::mutex buffer_mutex_;
     std::condition_variable buffer_cond_;
-
-    static int32_t milli_timeout_;
-    static bool thread_flag_;
-    std::thread clear_thread_;
-    volatile bool loop_flag_{true};
-
 };
 
 

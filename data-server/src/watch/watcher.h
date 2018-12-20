@@ -19,11 +19,13 @@ public:
             int64_t expire_time, common::ProtoMessage* msg, WatchType type = WatchType::kKey);
     ~Watcher();
 
+    void setBufferFlag(int64_t flag) { buffer_flag_ = flag; }
     int64_t getBufferFlag() const { return buffer_flag_; }
 
     uint64_t GetTableId() { return table_id_; }
 
     const std::vector<std::string>& GetKeys() const { return keys_; }
+
     const std::string& GetFirstKey() const {
         assert(!keys_.empty());
         return keys_[0];
