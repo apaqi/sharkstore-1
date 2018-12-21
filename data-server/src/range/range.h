@@ -256,7 +256,6 @@ private:
     bool CheckWriteable();
     bool KeyInRange(const std::string &key);
     bool KeyInRange(const std::string &key, errorpb::Error *&err);
-
     bool EpochIsEqual(const metapb::RangeEpoch &epoch);
     bool EpochIsEqual(const metapb::RangeEpoch &epoch, errorpb::Error *&);
 
@@ -274,6 +273,8 @@ private:
 private:
     friend class ::sharkstore::test::helper::RangeTestFixture;
 
+    bool verifyWatchKey(const watchpb::WatchKeyValue& kv, const metapb::RangeEpoch& epoch, errorpb::Error *& error);
+
     int32_t WatchNotify(const watchpb::EventType evtType, const watchpb::WatchKeyValue& kv, const int64_t &version, std::string &errMsg, bool prefix = false);
     int32_t loadFromDb(const watchpb::EventType &evtType,
                        const std::string &fromKey,
@@ -281,6 +282,7 @@ private:
                        const int64_t &startVersion,
                        watchpb::DsWatchResponse *dsResp);
     int32_t SendNotify( watch::WatcherPtr& w, watchpb::DsWatchResponse *ds_resp, bool prefix = false);
+
 
 private:
     static const int kTimeTakeWarnThresoldUSec = 500000;

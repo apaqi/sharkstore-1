@@ -8,6 +8,26 @@ namespace sharkstore {
 namespace dataserver {
 namespace range {
 
+
+bool Range::verifyWatchKey(const watchpb::WatchKeyValue& kv, const metapb::RangeEpoch& epoch, errorpb::Error *&err) {
+    if (kv.key().empty()) {
+        err = new errorpb::Error;
+        err->set_message("insufficient watch keys size");
+        return false;
+    }
+
+    if (!store_->CheckInRange(kv)) {
+        if (!EpochIsEqual(epoch)) {
+            err = StaleEpochError(epoch);
+        } else {
+            err = KeyNotInRange(kv.key(0));
+        }
+        return false;
+    }
+
+    return true;
+}
+
 Status Range::GetAndResp( watch::WatcherPtr pWatcher, const watchpb::WatchCreateRequest& req, const std::string &dbKey, const bool &prefix,
                           int64_t &version, watchpb::DsWatchResponse *dsResp) {
     version = 0;
@@ -319,37 +339,13 @@ void Range::WatchPut(common::ProtoMessage *msg, watchpb::DsKvWatchPutRequest &re
             break;
         }
 
-        auto kv = req.mutable_req()->mutable_kv();
-        if (kv->key().empty()) {
-            RANGE_LOG_WARN("WatchPut error: key empty");
-            err = KeyNotInRange("-");
+        const auto& kv = req.req().kv();
+        if (!verifyWatchKey(kv, req.header().range_epoch(), err)) {
             break;
         }
 
-        RANGE_LOG_DEBUG("WatchPut key:%s value:%s", kv->key(0).c_str(), kv->value().c_str());
+        RANGE_LOG_DEBUG("WatchPut key:%s value:%s", kv.key(0).c_str(), kv.value().c_str());
 
-        std::vector<std::string*> vecUserKeys;
-        for ( auto i = 0 ; i < kv->key_size(); i++) {
-            vecUserKeys.emplace_back(kv->mutable_key(i));
-        }
-
-        watch::Watcher::EncodeKey(&dbKey, meta_.GetTableID(), vecUserKeys);
-
-        auto epoch = req.header().range_epoch();
-        bool in_range = KeyInRange(dbKey);
-        bool is_equal = EpochIsEqual(epoch);
-
-        if (!in_range) {
-            if (is_equal) {
-                err = KeyNotInRange(dbKey);
-            } else {
-                err = StaleEpochError(epoch);
-            }
-
-            break;
-        }
-
-        //raft propagate at first, propagate KV after encodding
         if (!WatchPutSubmit(msg, req)) {
             err = RaftFailError();
         }
@@ -358,16 +354,13 @@ void Range::WatchPut(common::ProtoMessage *msg, watchpb::DsKvWatchPutRequest &re
 
     if (err != nullptr) {
         RANGE_LOG_WARN("WatchPut error: %s", err->message().c_str());
-
         auto resp = new watchpb::DsKvWatchPutResponse;
         return SendError(msg, req.header(), resp, err);
     }
-
 }
 
 void Range::WatchDel(common::ProtoMessage *msg, watchpb::DsKvWatchDeleteRequest &req) {
     errorpb::Error *err = nullptr;
-    std::string dbKey{""};
 
     auto btime = get_micro_second();
     context_->Statistics()->PushTime(monitor::HistogramType::kQWait, btime - msg->begin_time);
@@ -385,31 +378,7 @@ void Range::WatchDel(common::ProtoMessage *msg, watchpb::DsKvWatchDeleteRequest 
             break;
         }
 
-        auto kv = req.mutable_req()->mutable_kv();
-
-        if (kv->key_size() < 1) {
-            RANGE_LOG_WARN("WatchDel error due to key is empty");
-            err = KeyNotInRange("EmptyKey");
-            break;
-        }
-
-        std::vector<std::string*> vecUserKeys;
-        for ( auto i = 0 ; i < kv->key_size(); i++) {
-            vecUserKeys.emplace_back(kv->mutable_key(i));
-        }
-
-        watch::Watcher::EncodeKey(&dbKey, meta_.GetTableID(), vecUserKeys);
-
-        auto epoch = req.header().range_epoch();
-        bool in_range = KeyInRange(dbKey);
-        bool is_equal = EpochIsEqual(epoch);
-
-        if (!in_range) {
-            if (is_equal) {
-                err = KeyNotInRange(dbKey);
-            } else {
-                err = StaleEpochError(epoch);
-            }
+        if (!verifyWatchKey(req.req().kv(), req.header().range_epoch(), err)) {
             break;
         }
 
@@ -424,7 +393,6 @@ void Range::WatchDel(common::ProtoMessage *msg, watchpb::DsKvWatchDeleteRequest 
         auto resp = new watchpb::DsKvWatchDeleteResponse;
         return SendError(msg, req.header(), resp, err);
     }
-
 }
 
 bool Range::WatchPutSubmit(common::ProtoMessage *msg, watchpb::DsKvWatchPutRequest &req) {
@@ -435,10 +403,8 @@ bool Range::WatchPutSubmit(common::ProtoMessage *msg, watchpb::DsKvWatchPutReque
             cmd.set_cmd_type(raft_cmdpb::CmdType::KvWatchPut);
             cmd.set_allocated_kv_watch_put_req(req.release_req());
         });
-
-        return ret.ok() ? true : false;
+        return ret.ok();
     }
-
     return false;
 }
 
@@ -451,10 +417,8 @@ bool Range::WatchDeleteSubmit(common::ProtoMessage *msg,
             cmd.set_cmd_type(raft_cmdpb::CmdType::KvWatchDel);
             cmd.set_allocated_kv_watch_del_req(req.release_req());
         });
-
-        return ret.ok() ? true : false;
+        return ret.ok();
     }
-
     return false;
 }
 
@@ -462,12 +426,10 @@ Status Range::ApplyWatchPut(const raft_cmdpb::Command &cmd, uint64_t raftIdx) {
     Status ret;
     errorpb::Error *err = nullptr;
 
-    //RANGE_LOG_DEBUG("ApplyWatchPut begin");
     auto &req = cmd.kv_watch_put_req();
     auto btime = get_micro_second();
     watchpb::WatchKeyValue notifyKv;
     notifyKv.CopyFrom(req.kv());
-
 
     static int64_t version{0};
     version = raftIdx;

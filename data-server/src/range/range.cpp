@@ -626,6 +626,7 @@ errorpb::Error *Range::StaleReadIndexError(uint64_t read_index, uint64_t current
     return err;
 }
 
+
 }  // namespace range
 }  // namespace dataserver
 }  // namespace sharkstore
