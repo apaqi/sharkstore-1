@@ -43,16 +43,15 @@ bool Store::decodeWatchValue(const std::string& value, watchpb::WatchKeyValue *k
     return DecodeBytesValue(value, offset, kv->mutable_ext());
 }
 
-bool Store::CheckInRange(const watchpb::WatchKeyValue& kv) const {
-    return checkInRange(encodeWatchKey(kv));
+std::string Store::EncodeWatchKey(const watchpb::WatchKeyValue& kv) const {
+    return encodeWatchKey(kv);
 }
 
 Status Store::WatchPut(const watchpb::WatchKeyValue& kv, int64_t version) {
-    if (kv.key_size() == 0) {
-        return Status(Status::kInvalidArgument, "insufficient keys size",
-                      std::to_string(kv.key_size()));
-    }
     auto key = encodeWatchKey(kv);
+    if (!checkInRange(key)) {
+        return Status(Status::kNotInRange);
+    }
     auto value = encodeWatchValue(kv, version);
     return this->Put(key, value);
 }
@@ -102,18 +101,16 @@ Status Store::watchDeletePrefix(const watchpb::WatchKeyValue& kv,
 Status Store::WatchDelete(const watchpb::WatchKeyValue& key, bool prefix,
                    std::vector<watchpb::WatchKeyValue> *deleted_keys) {
     assert(deleted_keys != nullptr);
-
-    if (key.key_size() == 0) {
-        return Status(Status::kInvalidArgument, "insufficient keys size",
-                      std::to_string(key.key_size()));
-    }
-
-    if (!prefix) {
-        deleted_keys->push_back(key);
-        return this->Delete(encodeWatchKey(key));
-    } else {
+    if (prefix) {
         return watchDeletePrefix(key, deleted_keys);
     }
+
+    auto db_key = encodeWatchKey(key);
+    if (!checkInRange(db_key)) {
+        return Status(Status::kNotInRange);
+    }
+    deleted_keys->push_back(key);
+    return this->Delete(db_key);
 }
 
 Status Store::watchGetPrefix(const watchpb::WatchKeyValue& kv,
@@ -148,17 +145,15 @@ Status Store::WatchGet(const watchpb::WatchKeyValue& key, bool prefix,
                 std::vector<watchpb::WatchKeyValue> *result) {
     assert(result != nullptr);
 
-    if (key.key_size() == 0) {
-        return Status(Status::kInvalidArgument, "insufficient keys size",
-                      std::to_string(key.key_size()));
-    }
-
     if (prefix) {
         return watchGetPrefix(key, result);
     }
 
     std::string db_value;
     auto db_key = encodeWatchKey(key);
+    if (!checkInRange(db_key)) {
+        return Status(Status::kNotInRange);
+    }
     auto s = this->Get(db_key, &db_value);
     if (!s.ok()) {
         return s;

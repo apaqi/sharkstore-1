@@ -16,11 +16,12 @@ bool Range::verifyWatchKey(const watchpb::WatchKeyValue& kv, const metapb::Range
         return false;
     }
 
-    if (!store_->CheckInRange(kv)) {
+    auto db_key = store_->EncodeWatchKey(kv);
+    if (!KeyInRange(db_key)) {
         if (!EpochIsEqual(epoch)) {
             err = StaleEpochError(epoch);
         } else {
-            err = KeyNotInRange(kv.key(0));
+            err = KeyNotInRange(db_key);
         }
         return false;
     }
@@ -349,7 +350,6 @@ void Range::WatchPut(common::ProtoMessage *msg, watchpb::DsKvWatchPutRequest &re
         if (!WatchPutSubmit(msg, req)) {
             err = RaftFailError();
         }
-
     } while (false);
 
     if (err != nullptr) {
@@ -422,61 +422,38 @@ bool Range::WatchDeleteSubmit(common::ProtoMessage *msg,
     return false;
 }
 
-Status Range::ApplyWatchPut(const raft_cmdpb::Command &cmd, uint64_t raftIdx) {
+Status Range::ApplyWatchPut(const raft_cmdpb::Command &cmd, uint64_t raft_index) {
     Status ret;
     errorpb::Error *err = nullptr;
-
-    auto &req = cmd.kv_watch_put_req();
     auto btime = get_micro_second();
-    watchpb::WatchKeyValue notifyKv;
-    notifyKv.CopyFrom(req.kv());
+    auto version = static_cast<int64_t>(raft_index);
+    const auto& kv = cmd.kv_watch_put_req().kv();
 
-    static int64_t version{0};
-    version = raftIdx;
-
-    notifyKv.set_version(version);
     RANGE_LOG_DEBUG("ApplyWatchPut new version[%" PRIu64 "]", version);
 
-    int64_t beginTime(getticks());
-
-    std::string dbKey;
-    std::string dbValue;
-    if( Status::kOk != WatchEncodeAndDecode::EncodeKv(funcpb::kFuncWatchPut, meta_.Get(), notifyKv, dbKey, dbValue, err) ) {
-        //to do
-        // SendError()
-        FLOG_WARN("EncodeKv failed, key:%s ", notifyKv.key(0).c_str());
-        ;
-    }
-
-    notifyKv.clear_key();
-    notifyKv.add_key(dbKey);
-    notifyKv.set_value(dbValue);
-    RANGE_LOG_DEBUG("ApplyWatchPut dbkey:%s dbvalue:%s", EncodeToHexString(dbKey).c_str(), EncodeToHexString(dbValue).c_str());
-
     do {
-
-        if (!KeyInRange(dbKey, err)) {
-            FLOG_WARN("Apply WatchPut failed, key:%s not in range.", dbKey.data());
-            ret = std::move(Status(Status::kInvalidArgument, "key not in range", ""));
-            break;
-        }
-
-        //save to db
-        auto btime = get_micro_second();
-        ret = store_->Put(dbKey, dbValue);
-        context_->Statistics()->PushTime(monitor::HistogramType::kQWait,
-                                       get_micro_second() - btime);
-
-
+        ret = store_->WatchPut(kv, version);
+        context_->Statistics()->PushTime(monitor::HistogramType::kStore, get_micro_second() - btime);
         if (!ret.ok()) {
-            FLOG_ERROR("ApplyWatchPut failed, code:%d, msg:%s", ret.code(),
-                       ret.ToString().data());
+            RANGE_LOG_ERROR("ApplyWatchPut failed: kv=%s, err=%s", kv.ShortDebugString().c_str(), ret.ToString().c_str());
+            if (ret.code() == Status::kNotInRange) {
+                err = KeyNotInRange(store_->EncodeWatchKey(kv));
+            }
             break;
         }
 
         if (cmd.cmd_id().node_id() == node_id_) {
-            auto len = static_cast<uint64_t>(req.kv().ByteSizeLong());
+            auto len = static_cast<uint64_t>(kv.ByteSizeLong());
             CheckSplit(len);
+
+            // TODO: notify
+            std::string errMsg;
+            int32_t retCnt = WatchNotify(watchpb::PUT, kv, version, errMsg);
+            if (retCnt < 0) {
+                FLOG_ERROR("WatchNotify-put failed, ret:%d, msg:%s", retCnt, errMsg.c_str());
+            } else {
+                FLOG_DEBUG("WatchNotify-put success, count:%d, msg:%s", retCnt, errMsg.c_str());
+            }
         }
     } while (false);
 
@@ -484,162 +461,57 @@ Status Range::ApplyWatchPut(const raft_cmdpb::Command &cmd, uint64_t raftIdx) {
         auto resp = new watchpb::DsKvWatchPutResponse;
         resp->mutable_resp()->set_code(ret.code());
         ReplySubmit(cmd, resp, err, btime);
-
-        //notify watcher
-        std::string errMsg;
-        int32_t retCnt = WatchNotify(watchpb::PUT, req.kv(), version, errMsg);
-        if (retCnt < 0) {
-            FLOG_ERROR("WatchNotify-put failed, ret:%d, msg:%s", retCnt, errMsg.c_str());
-        } else {
-            FLOG_DEBUG("WatchNotify-put success, count:%d, msg:%s", retCnt, errMsg.c_str());
-        }
-
     } else if (err != nullptr) {
         delete err;
-        return ret;
     }
-
-    int64_t endTime(getticks());
-    FLOG_DEBUG("ApplyWatchPut key[%s], take time:%" PRId64 " ms", EncodeToHexString(dbKey).c_str(), endTime - beginTime);
 
     return ret;
 }
 
-Status Range::ApplyWatchDel(const raft_cmdpb::Command &cmd, uint64_t raftIdx) {
+Status Range::ApplyWatchDel(const raft_cmdpb::Command &cmd, uint64_t raft_index) {
     Status ret;
     errorpb::Error *err = nullptr;
 
-    auto &req = cmd.kv_watch_del_req();
     auto btime = get_micro_second();
-    watchpb::WatchKeyValue notifyKv;
-    notifyKv.CopyFrom(req.kv());
-    auto prefix = req.prefix();
+    const auto &req = cmd.kv_watch_del_req();
+    int64_t version = static_cast<int64_t>(raft_index);
 
-    uint64_t version = raftIdx;
-
-    notifyKv.set_version(version);
-    RANGE_LOG_DEBUG("ApplyWatchDel new-version[%" PRIu64 "]", version);
-
-
-    std::string dbKey{""};
-    std::string dbValue{""};
-
-    std::vector<std::string*> userKeys;
-    for(auto i = 0; i < req.kv().key_size(); i++) {
-        userKeys.push_back(new std::string(req.kv().key(i)));
-    }
-    watch::Watcher::EncodeKey(&dbKey, meta_.GetTableID(), userKeys);
-
-    for(auto it:userKeys) {
-        delete it;
-    }
-
-    if(!req.kv().value().empty()) {
-        std::string extend;
-        watch::EncodeValue(&dbValue, version, req.kv().value(), extend);
-    }
-
-    std::vector<std::string> delKeys;
-
-    if (!KeyInRange(dbKey, err)) {
-        FLOG_WARN("ApplyWatchDel failed, key:%s not in range.", dbKey.data());
-    }
-    if (err != nullptr) {
-        delete err;
-        return ret;
-    }
-
-    if(prefix) {
-        std::string dbKeyEnd(dbKey);
-        if (0 != WatchEncodeAndDecode::NextComparableBytes(dbKey.data(), dbKey.length(), dbKeyEnd)) {
-            //to do set error message
-            FLOG_ERROR("NextComparableBytes error, skip key:%s", EncodeToHexString(dbKey).c_str());
-            return Status(Status::kUnknown);
-        }
-
-        RANGE_LOG_DEBUG("ApplyWatchDel key scope %s---%s", EncodeToHexString(dbKey).c_str(), EncodeToHexString(dbKeyEnd).c_str());
-        std::shared_ptr<storage::Iterator> iterator(store_->NewIterator(dbKey, dbKeyEnd));
-
-        for (int i = 0; iterator->Valid(); ++i) {
-            delKeys.push_back(std::move(iterator->key()));
-            iterator->Next();
-        }
-
-        std::string first_key("");
-        std::string last_key("");
-        int64_t keySize = delKeys.size();
-        if (delKeys.size() > 0) {
-            first_key = delKeys[0];
-            last_key = delKeys[delKeys.size() - 1];
-        }
-
-        RANGE_LOG_DEBUG("BatchDelete afftected_keys:%" PRId64 " first_key:%s last_key:%s",
-                        keySize,  EncodeToHexString(first_key).c_str(), EncodeToHexString(last_key).c_str());
-    } else {
-        delKeys.push_back(dbKey);
-    }
-
-    auto keySize(delKeys.size());
-    int64_t idx(0);
-
-    std::vector<std::string*> vecKeys;
-    for(auto it : delKeys) {
-        idx++;
-        FLOG_DEBUG("execute delte...[%" PRId64 "/%" PRIu64 "]", idx, keySize);
-
-        auto btime = get_micro_second();
-        ret = store_->Delete(it);
-        context_->Statistics()->PushTime(monitor::HistogramType::kQWait,
-                                       get_micro_second() - btime);
-
-        if (cmd.cmd_id().node_id() == node_id_ && delKeys[keySize-1] == it) {
-            //FLOG_DEBUG("Delete:%s del key:%s---last key:%s", ret.ToString().c_str(), EncodeToHexString(it).c_str(), EncodeToHexString(delKeys[keySize-1]).c_str());
-            auto resp = new watchpb::DsKvWatchDeleteResponse;
-            resp->mutable_resp()->set_code(ret.code());
-            ReplySubmit(cmd, resp, err, btime);
-
-        } else if (err != nullptr) {
-            delete err;
-            continue;
-        }
-
+    std::vector<watchpb::WatchKeyValue> deleted_keys;
+    do {
+        // delete from store
+        ret = store_->WatchDelete(req.kv(), req.prefix(), &deleted_keys);
+        context_->Statistics()->PushTime(monitor::HistogramType::kStore, get_micro_second() - btime);
         if (!ret.ok()) {
-            FLOG_ERROR("ApplyWatchDel failed, code:%d, msg:%s , key:%s", ret.code(),
-                       ret.ToString().c_str(), EncodeToHexString(dbKey).c_str());
-            continue;
+            RANGE_LOG_ERROR("ApplyWatchDel failed: kv=%s, err=%s", req.kv().ShortDebugString().c_str(), ret.ToString().c_str());
+
+            if (ret.code() == Status::kNotInRange) {
+                err = KeyNotInRange(store_->EncodeWatchKey(req.kv()));
+            }
+            break;
         }
 
-        FLOG_DEBUG("store->Delete->ret.code:%s", ret.ToString().c_str());
-
+        // notify
         if (cmd.cmd_id().node_id() == node_id_) {
-            notifyKv.clear_key();
-            vecKeys.clear();
-            watch::Watcher::DecodeKey(vecKeys, it);
-            for (auto key:vecKeys) {
-                notifyKv.add_key(*key);
-            }
-            for (auto key:vecKeys) {
-                delete key;
-            }
-
-            //notify watcher
-            int32_t retCnt(0);
-            std::string errMsg("");
-            retCnt = WatchNotify(watchpb::DELETE, notifyKv, version, errMsg, prefix);
-            if (retCnt < 0) {
-                FLOG_ERROR("WatchNotify-del failed, ret:%d, msg:%s", retCnt, errMsg.c_str());
-            } else {
-                FLOG_DEBUG("WatchNotify-del success, watch_count:%d, msg:%s", retCnt, errMsg.c_str());
+            for (const auto& kv: deleted_keys) {
+                // TODO:
+                int32_t retCnt(0);
+                std::string errMsg("");
+                retCnt = WatchNotify(watchpb::DELETE, kv, version, errMsg, req.prefix());
+                if (retCnt < 0) {
+                    FLOG_ERROR("WatchNotify-del failed, ret:%d, msg:%s", retCnt, errMsg.c_str());
+                } else {
+                    FLOG_DEBUG("WatchNotify-del success, watch_count:%d, msg:%s", retCnt, errMsg.c_str());
+                }
             }
         }
-    }
+    } while (false);
 
-    if(prefix && cmd.cmd_id().node_id() == node_id_ && keySize == 0) {
+    if(cmd.cmd_id().node_id() == node_id_) {
         auto resp = new watchpb::DsKvWatchDeleteResponse;
-        //Delete没有失败,统一返回ok
-        ret = Status(Status::kOk);
         resp->mutable_resp()->set_code(ret.code());
         ReplySubmit(cmd, resp, err, btime);
+    } else if (err != nullptr) {
+        delete err;
     }
 
     return ret;

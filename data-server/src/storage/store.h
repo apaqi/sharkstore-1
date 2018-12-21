@@ -43,7 +43,7 @@ public:
     Status Truncate();
 
     // watch functions
-    bool CheckInRange(const watchpb::WatchKeyValue& kv) const;
+    std::string EncodeWatchKey(const watchpb::WatchKeyValue& kv) const;
     Status WatchPut(const watchpb::WatchKeyValue& kv, int64_t version);
     Status WatchDelete(const watchpb::WatchKeyValue& key, bool prefix,
             std::vector<watchpb::WatchKeyValue> *deleted_keys);

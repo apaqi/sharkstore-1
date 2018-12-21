@@ -1,6 +1,8 @@
 #ifndef _WATCH_H_
 #define _WATCH_H_
 
+#include "proto/gen/watchpb.pb.h"
+
 namespace sharkstore {
 namespace dataserver {
 namespace watch {
@@ -10,6 +12,8 @@ typedef std::string Key;
 typedef std::string Prefix;
 typedef std::string WatcherKey;
 typedef std::string PrefixKey;
+
+using WatchTarget = ::google::protobuf::RepeatedPtrField<std::string>;
 
 enum class WatchCode {
     kOK = 0,
